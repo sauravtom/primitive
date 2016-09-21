@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"math/rand"
+	"runtime"
 	"strings"
 	"time"
 
@@ -199,14 +200,24 @@ func (model *Model) RandomState(buffer *image.RGBA, t Mode) *State {
 	}
 }
 
-func (model *Model) computeColor(lines []Scanline, alpha int) Color {
-	var count int
-	var rsum, gsum, bsum float64
+type colorSum struct {
+	r, g, b float64
+	n       int
+}
+
+func (a colorSum) add(b colorSum) colorSum {
+	return colorSum{a.r + b.r, a.g + b.g, a.b + b.b, a.n + b.n}
+}
+
+func (model *Model) computeColorWorker(lines []Scanline, alpha int, wi, wn int, ch chan colorSum) {
+	var sum colorSum
 	a := float64(alpha) / 255
-	for _, line := range lines {
+	for i, line := range lines {
+		if i%wn != wi {
+			continue
+		}
 		i := model.Target.PixOffset(line.X1, line.Y)
 		for x := line.X1; x <= line.X2; x++ {
-			count++
 			tr := float64(model.Target.Pix[i])
 			tg := float64(model.Target.Pix[i+1])
 			tb := float64(model.Target.Pix[i+2])
@@ -214,17 +225,31 @@ func (model *Model) computeColor(lines []Scanline, alpha int) Color {
 			cg := float64(model.Current.Pix[i+1])
 			cb := float64(model.Current.Pix[i+2])
 			i += 4
-			rsum += (a*cr - cr + tr) / a
-			gsum += (a*cg - cg + tg) / a
-			bsum += (a*cb - cb + tb) / a
+			sum.r += (a*cr - cr + tr) / a
+			sum.g += (a*cg - cg + tg) / a
+			sum.b += (a*cb - cb + tb) / a
+			sum.n++
 		}
 	}
-	if count == 0 {
+	ch <- sum
+}
+
+func (model *Model) computeColor(lines []Scanline, alpha int) Color {
+	wn := runtime.GOMAXPROCS(0)
+	ch := make(chan colorSum, wn)
+	for wi := 0; wi < wn; wi++ {
+		go model.computeColorWorker(lines, alpha, wi, wn, ch)
+	}
+	var sum colorSum
+	for wi := 0; wi < wn; wi++ {
+		sum = sum.add(<-ch)
+	}
+	if sum.n == 0 {
 		return Color{}
 	}
-	r := clampInt(int(rsum/float64(count)), 0, 255)
-	g := clampInt(int(gsum/float64(count)), 0, 255)
-	b := clampInt(int(bsum/float64(count)), 0, 255)
+	r := clampInt(int(sum.r/float64(sum.n)), 0, 255)
+	g := clampInt(int(sum.g/float64(sum.n)), 0, 255)
+	b := clampInt(int(sum.b/float64(sum.n)), 0, 255)
 	return Color{r, g, b, alpha}
 }
 
